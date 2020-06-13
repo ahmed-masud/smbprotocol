@@ -2,10 +2,16 @@
 # Copyright: (c) 2019, Jordan Borean (@jborean93) <jborean93@gmail.com>
 # MIT License (see LICENSE or https://opensource.org/licenses/MIT)
 
+import dataclasses
 import logging
+import typing
 
 from collections import (
     OrderedDict,
+)
+
+from functools import (
+    partial,
 )
 
 from smbprotocol import (
@@ -1065,6 +1071,22 @@ class SMB2SetInfoResponse(Structure):
         super(SMB2SetInfoResponse, self).__init__()
 
 
+R = typing.TypeVar('R')
+
+@dataclasses.dataclass
+class OpenMessage(typing.Generic[R]):
+    """
+    Request message and response handler and some other data needed
+    to handle IO for actions on `Open`.
+    """
+    message: Structure
+    response_handler: typing.Callable[['smbprotocol.connection.SMB2HeaderResponse'], R]
+    log_send: str
+    log_recv: str
+    exception_handler: typing.Optional[typing.Callable[[SMBResponseException], R]] = None
+    recv_wait: bool = True
+
+
 class Open(object):
 
     def __init__(self, tree, name):
@@ -1134,52 +1156,32 @@ class Open(object):
     def connected(self):
         return self._connected
 
-    def create(self, impersonation_level, desired_access, file_attributes,
-               share_access, create_disposition, create_options,
-               create_contexts=None,
-               oplock_level=RequestedOplockLevel.SMB2_OPLOCK_LEVEL_NONE,
-               send=True):
+    def _run_request(self, message: OpenMessage[R]) -> R:
+        self._info(message.log_send)
+        log.debug(message)
+        request = self.connection.send(
+            message,
+            self.tree_connect.session.session_id,
+            self.tree_connect.tree_connect_id,
+        )
+        self._info(message.log_recv)
+        try:
+            response = self.connection.receive(request, wait=message.recv_wait)
+        except SMBResponseException as exc:
+            if message.exception_handler:
+                return message.exception_handler(exc)
+            else:
+                raise exc
+        return response_handler(response)
+
+    def build_create(
+        self, impersonation_level, desired_access, file_attributes,
+        share_access, create_disposition, create_options,
+        create_contexts=None,
+        oplock_level=RequestedOplockLevel.SMB2_OPLOCK_LEVEL_NONE,
+    ) -> OpenMessage[typing.Optional[typing.List[typing.Union[bytes, Structure]]]]:
         """
-        This will open the file based on the input parameters supplied. Any
-        file open should also be called with Open.close() when it is finished.
-
-        More details on how each option affects the open process can be found
-        here https://msdn.microsoft.com/en-us/library/cc246502.aspx.
-
-        Supports out of band send function, call this function with send=False
-        to return a tuple of (SMB2CreateRequest, receive_func) instead of
-        sending the the request and waiting for the response. The receive_func
-        can be used to get the response from the server by passing in the
-        Request that was used to sent it out of band.
-
-        :param impersonation_level: (ImpersonationLevel) The type of
-            impersonation level that is issuing the create request.
-        :param desired_access: The level of access that is required of the
-            open. FilePipePrinterAccessMask or DirectoryAccessMask should be
-            used depending on the type of file being opened.
-        :param file_attributes: (FileAttributes) attributes to set on the file
-            being opened, this usually is for opens that creates a file.
-        :param share_access: (ShareAccess) Specifies the sharing mode for the
-            open.
-        :param create_disposition: (CreateDisposition) Defines the action the
-            server MUST take if the file already exists.
-        :param create_options: (CreateOptions) Specifies the options to be
-            applied when creating or opening the file.
-        :param create_contexts: (List<SMB2CreateContextRequest>) List of
-            context request values to be applied to the create.
-
-        Create Contexts are used to encode additional flags and attributes when
-        opening files. More details on create context request values can be
-        found here https://msdn.microsoft.com/en-us/library/cc246504.aspx.
-
-        :param oplock_level: The requested oplock level of the request.
-        :param send: Whether to send the request in the same call or return the
-            message to the caller and the unpack function
-
-        :return: List of context response values or None if there are no
-            context response values. If the context response value is not known
-            to smbprotocol then the list value would be raw bytes otherwise
-            it is a Structure defined in create_contexts.py
+        Build message for `create`.
         """
         create = SMB2CreateRequest()
         create['requested_oplock_level'] = oplock_level
@@ -1203,20 +1205,16 @@ class Open(object):
             self.file_attributes = file_attributes
             self.create_disposition = create_disposition
 
-        if not send:
-            return create, self._create_response
+        return OpenMessage(
+            message=create,
+            response_handler=self._create_response,
+            log_send="sending SMB2 Create Request for file %s" % self.file_name,
+            loc_recv="receiving SMB2 Create Response",
+        )
 
-        self._info("sending SMB2 Create Request for file %s" % self.file_name)
-
-        log.debug(create)
-        request = self.connection.send(create,
-                                       self.tree_connect.session.session_id,
-                                       self.tree_connect.tree_connect_id)
-        return self._create_response(request)
-
-    def _create_response(self, request):
-        self._info("receiving SMB2 Create Response")
-        response = self.connection.receive(request)
+    def _create_response(
+        self, response,
+    ) -> typing.Optional[typing.List[typing.Union[bytes, Structure]]]:
         create_response = SMB2CreateResponse()
         create_response.unpack(response['data'].get_value())
 
@@ -1250,28 +1248,60 @@ class Open(object):
 
         return create_contexts_response
 
-    def read(self, offset, length, min_length=0, unbuffered=False, wait=True,
-             send=True):
+    def create(
+        self, impersonation_level, desired_access, file_attributes,
+        share_access, create_disposition, create_options,
+        create_contexts=None,
+        oplock_level=RequestedOplockLevel.SMB2_OPLOCK_LEVEL_NONE,
+    ) -> typing.Optional[typing.List[typing.Union[bytes, Structure]]]:
         """
-        Reads from an opened file or pipe
+        This will open the file based on the input parameters supplied. Any
+        file open should also be called with Open.close() when it is finished.
 
-        Supports out of band send function, call this function with send=False
-        to return a tuple of (SMB2ReadRequest, receive_func) instead of
-        sending the the request and waiting for the response. The receive_func
-        can be used to get the response from the server by passing in the
-        Request that was used to sent it out of band.
+        More details on how each option affects the open process can be found
+        here https://msdn.microsoft.com/en-us/library/cc246502.aspx.
 
-        :param offset: The offset to start the read of the file.
-        :param length: The number of bytes to read from the offset.
-        :param min_length: The minimum number of bytes to be read for a
-            successful operation.
-        :param unbuffered: Whether to the server should cache the read data at
-            intermediate layers, only value for SMB 3.0.2 or newer
-        :param wait: If send=True, whether to wait for a response if
-            STATUS_PENDING was received from the server or fail.
-        :param send: Whether to send the request in the same call or return the
-            message to the caller and the unpack function
-        :return: A byte string of the bytes read
+        :param impersonation_level: (ImpersonationLevel) The type of
+            impersonation level that is issuing the create request.
+        :param desired_access: The level of access that is required of the
+            open. FilePipePrinterAccessMask or DirectoryAccessMask should be
+            used depending on the type of file being opened.
+        :param file_attributes: (FileAttributes) attributes to set on the file
+            being opened, this usually is for opens that creates a file.
+        :param share_access: (ShareAccess) Specifies the sharing mode for the
+            open.
+        :param create_disposition: (CreateDisposition) Defines the action the
+            server MUST take if the file already exists.
+        :param create_options: (CreateOptions) Specifies the options to be
+            applied when creating or opening the file.
+        :param create_contexts: (List<SMB2CreateContextRequest>) List of
+            context request values to be applied to the create.
+
+        Create Contexts are used to encode additional flags and attributes when
+        opening files. More details on create context request values can be
+        found here https://msdn.microsoft.com/en-us/library/cc246504.aspx.
+
+        :param oplock_level: The requested oplock level of the request.
+
+        :return: List of context response values or None if there are no
+            context response values. If the context response value is not known
+            to smbprotocol then the list value would be raw bytes otherwise
+            it is a Structure defined in create_contexts.py
+        """
+        message = self.build_create(
+            impersonation_level, desired_access, file_attributes,
+            share_access, create_disposition, create_options,
+            create_contexts,
+            oplock_level,
+        )
+
+        return self._run_request(message)
+
+    def build_read(
+        self, offset, length, min_length=0, unbuffered=False, wait=True
+    ) -> OpenMessage[bytes]:
+        """
+        Build message for `read`.
         """
         if length > self.connection.max_read_size:
             raise SMBException("The requested read length %d is greater than "
@@ -1293,47 +1323,47 @@ class Open(object):
                                             True)
             read['flags'].set_flag(ReadFlags.SMB2_READFLAG_READ_UNBUFFERED)
 
-        if not send:
-            return read, self._read_response
+        return OpenMessage(
+            message=read,
+            response_handler=self._read_response,
+            log_send="sending SMB2 Read Request for file %s" % self.file_name,
+            loc_recv="receiving SMB2 Read Response",
+            recv_wait=wait,
+        )
 
-        self._info("sending SMB2 Read Request for file %s" self.file_name)
-        log.debug(read)
-        request = self.connection.send(read,
-                                       self.tree_connect.session.session_id,
-                                       self.tree_connect.tree_connect_id)
-        return self._read_response(request, wait)
-
-    def _read_response(self, request, wait=True):
-        self._info("receiving SMB2 Read Response")
-        response = self.connection.receive(request, wait=wait)
+    def _read_response(self, response) -> bytes:
         read_response = SMB2ReadResponse()
         read_response.unpack(response['data'].get_value())
         log.debug(read_response)
 
         return read_response['buffer'].get_value()
 
-    def write(self, data, offset=0, write_through=False, unbuffered=False,
-              wait=True, send=True):
+    def read(
+        self, offset, length, min_length=0, unbuffered=False, wait=True
+    ) -> bytes:
         """
-        Writes data to an opened file.
+        Reads from an opened file or pipe
 
-        Supports out of band send function, call this function with send=False
-        to return a tuple of (SMBWriteRequest, receive_func) instead of
-        sending the the request and waiting for the response. The receive_func
-        can be used to get the response from the server by passing in the
-        Request that was used to sent it out of band.
-
-        :param data: The bytes data to write.
-        :param offset: The offset in the file to write the bytes at
-        :param write_through: Whether written data is persisted to the
-            underlying storage, not valid for SMB 2.0.2.
-        :param unbuffered: Whether to the server should cache the write data at
+        :param offset: The offset to start the read of the file.
+        :param length: The number of bytes to read from the offset.
+        :param min_length: The minimum number of bytes to be read for a
+            successful operation.
+        :param unbuffered: Whether to the server should cache the read data at
             intermediate layers, only value for SMB 3.0.2 or newer
-        :param wait: If send=True, whether to wait for a response if
-            STATUS_PENDING was received from the server or fail.
-        :param send: Whether to send the request in the same call or return the
-            message to the caller and the unpack function
-        :return: The number of bytes written
+        :param wait: Whether to wait for a response if STATUS_PENDING was
+            received from the server or fail.
+        :return: A byte string of the bytes read
+        """
+        message = self.build_read(offset, length, min_length, unbuffered, wait)
+
+        return self._run_request(message)
+
+    def build_write(
+        self, data, offset=0, write_through=False, unbuffered=False,
+        wait=True,
+    ) -> OpenMessage[int]:
+        """
+        Build message for `write`.
         """
         data_len = len(data)
         if data_len > self.connection.max_write_size:
@@ -1363,71 +1393,116 @@ class Open(object):
                                             True)
             write['flags'].set_flag(WriteFlags.SMB2_WRITEFLAG_WRITE_UNBUFFERED)
 
-        if not send:
-            return write, self._write_response
+        return OpenMessage(
+            message=write,
+            response_handler=self._write_response,
+            log_send="sending SMB2 Write Request for file %s" % self.file_name,
+            loc_recv="receiving SMB2 Read Response",
+            recv_wait=wait,
+        )
 
-        self._info("sending SMB2 Write Request for file %s" % self.file_name)
-        log.debug(write)
-        request = self.connection.send(write,
-                                       self.tree_connect.session.session_id,
-                                       self.tree_connect.tree_connect_id)
-        return self._write_response(request, wait)
-
-    def _write_response(self, request, wait=True):
-        self._info("receiving SMB2 Write Response")
-        response = self.connection.receive(request, wait=wait)
+    def _write_response(self, response) -> int:
         write_response = SMB2WriteResponse()
         write_response.unpack(response['data'].get_value())
         log.debug(write_response)
 
         return write_response['count'].get_value()
 
-    def flush(self, send=True):
+    def write(
+        self, data, offset=0, write_through=False, unbuffered=False,
+        wait=True
+    ) -> int:
         """
-        A command sent by the client to request that a server flush all cached
-        file information for the opened file.
+        Writes data to an opened file.
 
-        Supports out of band send function, call this function with send=False
-        to return a tuple of (SMB2FlushRequest, receive_func) instead of
-        sending the the request and waiting for the response. The receive_func
-        can be used to get the response from the server by passing in the
-        Request that was used to sent it out of band.
+        :param data: The bytes data to write.
+        :param offset: The offset in the file to write the bytes at
+        :param write_through: Whether written data is persisted to the
+            underlying storage, not valid for SMB 2.0.2.
+        :param unbuffered: Whether to the server should cache the write data at
+            intermediate layers, only value for SMB 3.0.2 or newer
+        :param wait: Whether to wait for a response if  STATUS_PENDING was
+            received from the server or fail.
+        :return: The number of bytes written
+        """
 
-        :param send: Whether to send the request in the same call or return the
-            message to the caller and the unpack function
-        :return: The SMB2FlushResponse received from the server
+        message = self.build_write(data, offset, write_through, unbuffered, wait)
+
+        return self._run_request(message)
+
+    def build_flush(self) -> OpenMessage[SMB2FlushResponse]:
+        """
+        Build message for `flush`.
         """
         flush = SMB2FlushRequest()
         flush['file_id'] = self.file_id
 
-        if not send:
-            return flush, self._flush_response
+        return OpenMessage(
+            message=flush,
+            response_handler=self._flush_response,
+            log_send="sending SMB2 Flush Request for file %s" % self.file_name,
+            loc_recv="receiving SMB2 Flush Response",
+        )
 
-        self._info("sending SMB2 Flush Request for file %s" % self.file_name)
-        log.debug(flush)
-        request = self.connection.send(flush,
-                                       self.tree_connect.session.session_id,
-                                       self.tree_connect.tree_connect_id)
-        return self._flush_response(request)
-
-    def _flush_response(self, request):
-        self._info("receiving SMB2 Flush Response")
-        response = self.connection.receive(request)
+    def _flush_response(self, response) -> SMB2FlushResponse:
         flush_response = SMB2FlushResponse()
         flush_response.unpack(response['data'].get_value())
         log.debug(flush_response)
         return flush_response
 
-    def query_directory(self, pattern, file_information_class, flags=None,
-                        file_index=0, max_output=MAX_PAYLOAD_SIZE, send=True):
+    def flush(self) -> SMB2FlushResponse:
+        """
+        A command sent by the client to request that a server flush all cached
+        file information for the opened file.
+
+        :return: The SMB2FlushResponse received from the server
+        """
+        message = self.build_flush()
+
+        return self._run_request(message)
+
+    def build_query_directory(
+        self, pattern, file_information_class, flags=None,
+        file_index=0, max_output=MAX_PAYLOAD_SIZE,
+    ) -> OpenMessage[typing.List[Structure]]:
+        """
+        Build message for `query_directory`.
+        """
+        query = SMB2QueryDirectoryRequest()
+        query['file_information_class'] = file_information_class
+        query['flags'] = flags
+        query['file_index'] = file_index
+        query['file_id'] = self.file_id
+        query['output_buffer_length'] = max_output
+        query['buffer'] = pattern.encode('utf-16-le')
+
+        response_handler = partial(
+            self._query_directory_response,
+            file_cl=file_information_class,  # needed to unpack response
+        )
+
+        return OpenMessage(
+            message=query,
+            response_handler=response_handler,
+            log_send="sending SMB2 Query Directory Request for directory %s" % self.file_name,
+            loc_recv="receiving SMB2 Query Response",
+        )
+
+    def _query_directory_response(self, response, *, file_cl) -> typing.List[Structure]:
+        query_response = SMB2QueryDirectoryResponse()
+        query_response.unpack(response['data'].get_value())
+        log.debug(query_response)
+
+        data = query_response['buffer'].get_value()
+        results = SMB2QueryDirectoryRequest.unpack_response(file_cl, data)
+        return results
+
+    def query_directory(
+        self, pattern, file_information_class, flags=None,
+        file_index=0, max_output=MAX_PAYLOAD_SIZE,
+    ) -> typing.List[Structure]:
         """
         Run a Query/Find on an opened directory based on the params passed in.
-
-        Supports out of band send function, call this function with send=False
-        to return a tuple of (SMB2QueryDirectoryRequest, receive_func) instead
-        of sending the the request and waiting for the response. The
-        receive_func can be used to get the response from the server by passing
-        in the Request that was used to sent it out of band.
 
         :param pattern: The string pattern to use for the query, this pattern
             format is based on the SMB server but * is usually a wildcard
@@ -1439,93 +1514,56 @@ class Open(object):
             the query should resume on, otherwise should be 0
         :param max_output: The maximum output size, defaulted to the max credit
             size but can be increased to reduced round trip operations.
-        :param send: Whether to send the request in the same call or return the
-            message to the caller and the unpack function
         :return: A list of structures defined in query_info.py, the list entry
             structure is based on the value of file_information_class in the
             request message
         """
-        query = SMB2QueryDirectoryRequest()
-        query['file_information_class'] = file_information_class
-        query['flags'] = flags
-        query['file_index'] = file_index
-        query['file_id'] = self.file_id
-        query['output_buffer_length'] = max_output
-        query['buffer'] = pattern.encode('utf-16-le')
+        message = self.build_query_directory(
+            pattern, file_information_class, flags,
+            file_index, max_output,
+        )
 
-        if not send:
-            return query, self._query_directory_response
+        return self._run_request(message)
 
-        self._info("sending SMB2 Query Directory Request for directory %s" % self.file_name)
-        log.debug(query)
-        request = self.connection.send(query,
-                                       self.tree_connect.session.session_id,
-                                       self.tree_connect.tree_connect_id)
-        return self._query_directory_response(request)
-
-    def _query_directory_response(self, request):
-        self._info("receiving SMB2 Query Response")
-        response = self.connection.receive(request)
-        query_response = SMB2QueryDirectoryResponse()
-        query_response.unpack(response['data'].get_value())
-        log.debug(query_response)
-
-        query_request = SMB2QueryDirectoryRequest()
-        query_request.unpack(request.message['data'].get_value())
-        file_cl = query_request['file_information_class'].get_value()
-        data = query_response['buffer'].get_value()
-        results = SMB2QueryDirectoryRequest.unpack_response(file_cl, data)
-        return results
-
-    def close(self, get_attributes=False, send=True):
+    def build_close(
+        self, get_attributes=False,
+    ) -> OpenMessage[typing.Optional[SMB2CloseResponse]]:
         """
-        Closes an opened file.
-
-        Supports out of band send function, call this function with send=False
-        to return a tuple of (SMB2CloseRequest, receive_func) instead of
-        sending the the request and waiting for the response. The receive_func
-        can be used to get the response from the server by passing in the
-        Request that was used to sent it out of band.
-
-        :param get_attributes: (Bool) whether to get the latest attributes on
-            the close and set them on the Open object
-        :param send: Whether to send the request in the same call or return the
-            message to the caller and the unpack function
-        :return: SMB2CloseResponse message received from the server
+        Build message for `close`.
         """
-        # it is already closed and this isn't for an out of band request
-        if not self._connected and send:
-            return
-
         close = SMB2CloseRequest()
 
         close['file_id'] = self.file_id
         if get_attributes:
             close['flags'] = CloseFlags.SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB
 
-        if not send:
-            return close, self._close_response
+        response_handler = partial(
+            self._close_response,
+            get_attributes=get_attributes,  # needed to unpack response
+        )
 
-        self._info("sending SMB2 Close Request for file %s" % self.file_name)
-        log.debug(close)
-        request = self.connection.send(close,
-                                       self.tree_connect.session.session_id,
-                                       self.tree_connect.tree_connect_id)
-        return self._close_response(request)
+        return OpenMessage(
+            message=close,
+            response_handler=response_handler,
+            exception_handler=self._close_response_exception,
+            log_send="sending SMB2 Close Request for file %s" % self.file_name,
+            loc_recv="receiving SMB2 Close Response",
+        )
 
-    def _close_response(self, request):
-        self._info("receiving SMB2 Close Response")
-        try:
-            response = self.connection.receive(request)
-        except SMBResponseException as exc:
-            # check if it was already closed
-            if exc.status == NtStatus.STATUS_FILE_CLOSED:
-                self._connected = False
-                self.tree_connect.session.open_table.pop(self.file_id, None)
-                return
-            # else raise the exception
-            raise exc
+    def _close_response_exception(
+        self, exc: SMBResponseException,
+    ) -> typing.Optional[SMB2CloseResponse]:
+        # check if it was already closed
+        if exc.status == NtStatus.STATUS_FILE_CLOSED:
+            self._connected = False
+            self.tree_connect.session.open_table.pop(self.file_id, None)
+            return
+        # else raise the exception
+        raise exc
 
+    def _close_response(
+        self, response, *, get_attributes: bool,
+    ) -> typing.Optional[SMB2CloseResponse]:
         c_resp = SMB2CloseResponse()
         c_resp.unpack(response['data'].get_value())
         log.debug(c_resp)
@@ -1533,10 +1571,7 @@ class Open(object):
         del self.tree_connect.session.open_table[self.file_id]
 
         # update the attributes if requested
-        close_request = SMB2CloseRequest()
-        close_request.unpack(request.message['data'].get_value())
-        if close_request['flags'].has_flag(
-                CloseFlags.SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB):
+        if get_attributes:
             self.creation_time = c_resp['creation_time'].get_value()
             self.last_access_time = c_resp['last_access_time'].get_value()
             self.last_write_time = c_resp['last_write_time'].get_value()
@@ -1545,3 +1580,19 @@ class Open(object):
             self.end_of_file = c_resp['end_of_file'].get_value()
             self.file_attributes = c_resp['file_attributes'].get_value()
         return c_resp
+
+    def close(self, get_attributes=False) -> typing.Optional[SMB2CloseResponse]:
+        """
+        Closes an opened file.
+
+        :param get_attributes: (Bool) whether to get the latest attributes on
+            the close and set them on the Open object
+        :return: SMB2CloseResponse message received from the server
+        """
+        # it is already closed and this isn't for an out of band request
+        if not self._connected:
+            return
+
+        message = self.build_close(get_attributes)
+
+        return self._run_request(message)
