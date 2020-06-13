@@ -1123,6 +1123,13 @@ class Open(object):
         self.file_attributes = None
         self.create_disposition = None
 
+    def _info(self, message):
+        log.info("Session: %s, Tree Connect: %s - %s" % (
+            self.tree_connect.session.username,
+            self.tree_connect.share_name,
+            message,
+        ))
+
     @property
     def connected(self):
         return self._connected
@@ -1199,10 +1206,7 @@ class Open(object):
         if not send:
             return create, self._create_response
 
-        log.info("Session: %s, Tree Connect: %s - sending SMB2 Create Request "
-                 "for file %s" % (self.tree_connect.session.username,
-                                  self.tree_connect.share_name,
-                                  self.file_name))
+        self._info("sending SMB2 Create Request for file %s" % self.file_name)
 
         log.debug(create)
         request = self.connection.send(create,
@@ -1211,9 +1215,7 @@ class Open(object):
         return self._create_response(request)
 
     def _create_response(self, request):
-        log.info("Session: %s, Tree Connect: %s - receiving SMB2 Create "
-                 "Response" % (self.tree_connect.session.username,
-                               self.tree_connect.share_name))
+        self._info("receiving SMB2 Create Response")
         response = self.connection.receive(request)
         create_response = SMB2CreateResponse()
         create_response.unpack(response['data'].get_value())
@@ -1294,10 +1296,7 @@ class Open(object):
         if not send:
             return read, self._read_response
 
-        log.info("Session: %s, Tree Connect ID: %s - sending SMB2 Read "
-                 "Request for file %s" % (self.tree_connect.session.username,
-                                          self.tree_connect.share_name,
-                                          self.file_name))
+        self._info("sending SMB2 Read Request for file %s" self.file_name)
         log.debug(read)
         request = self.connection.send(read,
                                        self.tree_connect.session.session_id,
@@ -1305,9 +1304,7 @@ class Open(object):
         return self._read_response(request, wait)
 
     def _read_response(self, request, wait=True):
-        log.info("Session: %s, Tree Connect ID: %s - receiving SMB2 Read "
-                 "Response" % (self.tree_connect.session.username,
-                               self.tree_connect.share_name))
+        self._info("receiving SMB2 Read Response")
         response = self.connection.receive(request, wait=wait)
         read_response = SMB2ReadResponse()
         read_response.unpack(response['data'].get_value())
@@ -1369,10 +1366,7 @@ class Open(object):
         if not send:
             return write, self._write_response
 
-        log.info("Session: %s, Tree Connect: %s - sending SMB2 Write Request "
-                 "for file %s" % (self.tree_connect.session.username,
-                                  self.tree_connect.share_name,
-                                  self.file_name))
+        self._info("sending SMB2 Write Request for file %s" % self.file_name)
         log.debug(write)
         request = self.connection.send(write,
                                        self.tree_connect.session.session_id,
@@ -1380,9 +1374,7 @@ class Open(object):
         return self._write_response(request, wait)
 
     def _write_response(self, request, wait=True):
-        log.info("Session: %s, Tree Connect: %s - receiving SMB2 Write "
-                 "Response" % (self.tree_connect.session.username,
-                               self.tree_connect.share_name))
+        self._info("receiving SMB2 Write Response")
         response = self.connection.receive(request, wait=wait)
         write_response = SMB2WriteResponse()
         write_response.unpack(response['data'].get_value())
@@ -1411,10 +1403,7 @@ class Open(object):
         if not send:
             return flush, self._flush_response
 
-        log.info("Session: %s, Tree Connect: %s - sending SMB2 Flush Request "
-                 "for file %s" % (self.tree_connect.session.username,
-                                  self.tree_connect.share_name,
-                                  self.file_name))
+        self._info("sending SMB2 Flush Request for file %s" % self.file_name)
         log.debug(flush)
         request = self.connection.send(flush,
                                        self.tree_connect.session.session_id,
@@ -1422,9 +1411,7 @@ class Open(object):
         return self._flush_response(request)
 
     def _flush_response(self, request):
-        log.info("Session: %s, Tree Connect: %s - receiving SMB2 Flush "
-                 "Response" % (self.tree_connect.session.username,
-                               self.tree_connect.share_name))
+        self._info("receiving SMB2 Flush Response")
         response = self.connection.receive(request)
         flush_response = SMB2FlushResponse()
         flush_response.unpack(response['data'].get_value())
@@ -1469,10 +1456,7 @@ class Open(object):
         if not send:
             return query, self._query_directory_response
 
-        log.info("Session: %s, Tree Connect: %s - sending SMB2 Query "
-                 "Directory Request for directory %s"
-                 % (self.tree_connect.session.username,
-                    self.tree_connect.share_name, self.file_name))
+        self._info("sending SMB2 Query Directory Request for directory %s" % self.file_name)
         log.debug(query)
         request = self.connection.send(query,
                                        self.tree_connect.session.session_id,
@@ -1480,9 +1464,7 @@ class Open(object):
         return self._query_directory_response(request)
 
     def _query_directory_response(self, request):
-        log.info("Session: %s, Tree Connect: %s - receiving SMB2 Query "
-                 "Response" % (self.tree_connect.session.username,
-                               self.tree_connect.share_name))
+        self._info("receiving SMB2 Query Response")
         response = self.connection.receive(request)
         query_response = SMB2QueryDirectoryResponse()
         query_response.unpack(response['data'].get_value())
@@ -1524,10 +1506,7 @@ class Open(object):
         if not send:
             return close, self._close_response
 
-        log.info("Session: %s, Tree Connect: %s - sending SMB2 Close Request "
-                 "for file %s" % (self.tree_connect.session.username,
-                                  self.tree_connect.share_name,
-                                  self.file_name))
+        self._info("sending SMB2 Close Request for file %s" % self.file_name)
         log.debug(close)
         request = self.connection.send(close,
                                        self.tree_connect.session.session_id,
@@ -1535,9 +1514,7 @@ class Open(object):
         return self._close_response(request)
 
     def _close_response(self, request):
-        log.info("Session: %s, Tree Connect: %s - receiving SMB2 Close "
-                 "Response" % (self.tree_connect.session.username,
-                               self.tree_connect.share_name))
+        self._info("receiving SMB2 Close Response")
         try:
             response = self.connection.receive(request)
         except SMBResponseException as exc:
