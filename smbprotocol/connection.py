@@ -2,8 +2,7 @@
 # Copyright: (c) 2019, Jordan Borean (@jborean93) <jborean93@gmail.com>
 # MIT License (see LICENSE or https://opensource.org/licenses/MIT)
 
-from __future__ import division
-
+import asyncio
 import binascii
 import hashlib
 import hmac
@@ -12,7 +11,6 @@ import math
 import os
 import struct
 import time
-import threading
 
 from collections import (
     OrderedDict,
@@ -37,10 +35,6 @@ from cryptography.hazmat.primitives.ciphers import (
 
 from datetime import (
     datetime,
-)
-
-from threading import (
-    Lock,
 )
 
 from smbprotocol import (
@@ -80,11 +74,6 @@ from smbprotocol.structure import (
 from smbprotocol.transport import (
     Tcp,
 )
-
-try:
-    from queue import Queue
-except ImportError:  # pragma: no cover
-    from Queue import Queue
 
 log = logging.getLogger(__name__)
 
@@ -756,14 +745,6 @@ class SMB2TransformHeader(Structure):
         super(SMB2TransformHeader, self).__init__()
 
 
-def _worker_running(func):
-    """ Ensures the message worker thread is still running and hasn't failed for any reason. """
-    def wrapped(self, *args, **kwargs):
-        self._check_worker_running()
-        return func(self, *args, **kwargs)
-    return wrapped
-
-
 class Connection(object):
 
     def __init__(self, guid, server_name, port=445, require_signing=True):
@@ -787,6 +768,7 @@ class Connection(object):
         self.server_name = server_name
         self.port = port
         self.transport = None  # Instanciated in .connect()
+        self._message_task = None
 
         # Table of Session entries, the order is important for smbclient.
         self.session_table = OrderedDict()
@@ -804,7 +786,7 @@ class Connection(object):
             low=0,
             high=1
         )
-        self.sequence_lock = Lock()
+        self.sequence_lock = asyncio.Lock()
 
         # Byte array containing the negotiate token and remembered for
         # authentication
@@ -855,7 +837,7 @@ class Connection(object):
         # Keep track of the message processing thread's potential traceback that it may raise.
         self._t_exc = None
 
-    def connect(self, dialect=None, timeout=60):
+    async def connect(self, dialect=None, timeout=60):
         """
         Will connect to the target server and negotiate the capabilities
         with the client. Once setup, the client MUST call the disconnect()
@@ -870,15 +852,16 @@ class Connection(object):
             negotiation process to complete
         """
         log.info("Setting up transport connection")
-        message_queue = Queue()
+        message_queue = asyncio.Queue()
         self.transport = Tcp(self.server_name, self.port, message_queue, timeout)
-        t_worker = threading.Thread(target=self._process_message_thread, args=(message_queue,),
-                                    name="msg_worker-%s:%s" % (self.server_name, self.port))
-        t_worker.daemon = True
-        t_worker.start()
+        await self.transport.connect()
+        self._message_task = asyncio.create_task(
+            self._process_message_task(message_queue),
+            name="msg_worker-%s:%s" % (self.server_name, self.port),
+        )
 
         log.info("Starting negotiation with SMB server")
-        smb_response = self._send_smb2_negotiate(dialect, timeout)
+        smb_response = await self._send_smb2_negotiate(dialect, timeout)
         log.info("Negotiated dialect: %s"
                  % str(smb_response['dialect_revision']))
         self.dialect = smb_response['dialect_revision'].get_value()
@@ -933,7 +916,7 @@ class Connection(object):
                     self.preauth_integrity_hash_id = \
                         HashAlgorithms.get_algorithm(hash_id)
 
-    def disconnect(self, close=True):
+    async def disconnect(self, close=True):
         """
         Closes the connection as well as logs off any of the
         Disconnects the TCP connection and shuts down the socket listener
@@ -944,12 +927,29 @@ class Connection(object):
         """
         if close:
             for session in list(self.session_table.values()):
-                session.disconnect(True)
+                await session.disconnect(True)
 
         log.info("Disconnecting transport connection")
-        self.transport.close()
+        if self.transport:
+            await self.transport.disconnect()
+            self.transport = None
+        if self._message_task:
+            await self._message_task
+            self._message_task = None
 
-    def send(self, message, sid=None, tid=None, credit_request=None, message_id=None, async_id=None):
+    def close(self):
+        """
+        Closes the connection.
+        """
+        log.info("Closing transport connection")
+        if self.transport:
+            self.transport.close()
+            self.transport = None
+        if self._message_task:
+            self._message_task.cancel()
+            self._message_task = None
+
+    async def send(self, message, sid=None, tid=None, credit_request=None, message_id=None, async_id=None):
         """
         Will send a message to the server that is passed in. The final unencrypted header is returned to the function
         that called this.
@@ -962,10 +962,10 @@ class Connection(object):
         :param async_id: The async_id for the header, only useful for a cancel request.
         :return: Request of the message that was sent.
         """
-        return self._send([message], session_id=sid, tree_id=tid, message_id=message_id, credit_request=credit_request,
-                          async_id=async_id)[0]
+        return (await self._send([message], session_id=sid, tree_id=tid, message_id=message_id, credit_request=credit_request,
+                                 async_id=async_id))[0]
 
-    def send_compound(self, messages, sid, tid, related=False):
+    async def send_compound(self, messages, sid, tid, related=False):
         """
         Sends multiple messages within 1 TCP request, will fail if the size of the total length exceeds the maximum of
         the transport max.
@@ -978,10 +978,9 @@ class Connection(object):
         :return: List<Request> for each request that was sent, each entry in the list is in the same order of the
             message list that was passed in.
         """
-        return self._send(messages, session_id=sid, tree_id=tid, related=related)
+        return await self._send(messages, session_id=sid, tree_id=tid, related=related)
 
-    @_worker_running
-    def receive(self, request, wait=True, timeout=None, resolve_symlinks=True):
+    async def receive(self, request, wait=True, timeout=None, resolve_symlinks=True):
         """
         Polls the message buffer of the TCP connection and waits until a valid
         message is received based on the message_id passed in.
@@ -993,16 +992,19 @@ class Connection(object):
         :param resolve_symlinks: Set to automatically resolve symlinks in the path when opening a file or directory.
         :return: SMB2HeaderResponse of the received message
         """
+        self._check_worker_running()
         start_time = time.time()
         while True:
             iter_timeout = int(max(timeout - (time.time() - start_time), 1)) if timeout is not None else None
-            if not request.response_event.wait(timeout=iter_timeout):
-                raise SMBException("Connection timeout of %d seconds exceeded while waiting for a message id %s "
-                                   "response from the server" % (timeout, request.message['message_id'].get_value()))
+            try:
+                await asyncio.wait_for(request.response_event.wait(), timeout=iter_timeout)
+            except asyncio.TimeoutError:
+                raise asyncio.TimeoutError("Connection timeout of %d seconds exceeded while waiting for a message id %s "
+                                           "response from the server" % (timeout, request.message['message_id'].get_value()))
 
             # Use a lock on the request so that in the case of a pending response we have exclusive lock on the event
             # flag and can clear it without the future pending response taking it over before we first clear the flag.
-            with request.response_event_lock:
+            async with request.response_event_lock:
                 self._check_worker_running()  # The worker may have failed while waiting for the response, check again
 
                 response = request.response
@@ -1020,7 +1022,7 @@ class Connection(object):
                     # First wait for the other remaining requests to be processed. Their status will also fail and we
                     # need to make sure we update the old request with the new one properly.
                     related_requests = [self.outstanding_requests[i] for i in request.related_ids]
-                    [r.response_event.wait() for r in related_requests]
+                    [await r.response_event.wait() for r in related_requests]
 
                     # Now create a new request with the new path the symlink points to.
                     session = self.session_table[request.session_id]
@@ -1050,13 +1052,13 @@ class Connection(object):
 
                     # Now add all the related requests (if any) to send as a compound request.
                     new_msgs = [create_req] + [r.get_message_data() for r in related_requests]
-                    new_requests = self.send_compound(new_msgs, session.session_id, tree.tree_connect_id, related=True)
+                    new_requests = await self.send_compound(new_msgs, session.session_id, tree.tree_connect_id, related=True)
 
                     # Verify that the first request was successful before updating the related requests with the new
                     # info.
                     error = None
                     try:
-                        new_response = self.receive(new_requests[0], wait=wait, timeout=timeout, resolve_symlinks=True)
+                        new_response = await self.receive(new_requests[0], wait=wait, timeout=timeout, resolve_symlinks=True)
                     except SMBResponseException as exc:
                         # We need to make sure we fix up the remaining responses before throwing this.
                         error = exc
@@ -1083,7 +1085,7 @@ class Connection(object):
 
         return response
 
-    def echo(self, sid=0, timeout=60, credit_request=1):
+    async def echo(self, sid=0, timeout=60, credit_request=1):
         """
         Sends an SMB2 Echo request to the server. This can be used to request
         more credits from the server with the credit_request param.
@@ -1103,10 +1105,10 @@ class Connection(object):
 
         echo_msg = SMB2Echo()
         log.debug(echo_msg)
-        req = self.send(echo_msg, sid=sid, credit_request=credit_request)
+        req = await self.send(echo_msg, sid=sid, credit_request=credit_request)
 
         log.info("Receiving Echo response")
-        response = self.receive(req, timeout=timeout)
+        response = await self.receive(req, timeout=timeout)
         log.info("Credits granted from the server echo response: %d"
                  % response['credit_response'].get_value())
         echo_resp = SMB2Echo()
@@ -1148,12 +1150,12 @@ class Connection(object):
     def _check_worker_running(self):
         """ Checks that the message worker thread is still running and raises it's exception if it has failed. """
         if self._t_exc is not None:
-            self.disconnect(False)
+            self.close()
             raise self._t_exc
 
-    @_worker_running
-    def _send(self, messages, session_id=None, tree_id=None, message_id=None, credit_request=None, related=False,
-              async_id=None):
+    async def _send(self, messages, session_id=None, tree_id=None, message_id=None, credit_request=None, related=False,
+                    async_id=None):
+        self._check_worker_running()
         send_data = b""
         requests = []
         session = self.session_table.get(session_id, None)
@@ -1179,7 +1181,7 @@ class Connection(object):
             # When running with multiple threads we need to ensure that getting the message id and adjusting the
             # sequence windows is done in a thread safe manner so we use a lock to ensure only 1 thread accesses the
             # sequence window at a time.
-            with self.sequence_lock:
+            async with self.sequence_lock:
                 sequence_window_low = self.sequence_window['low']
                 sequence_window_high = self.sequence_window['high']
                 credit_charge = self._calculate_credit_charge(message)
@@ -1241,18 +1243,21 @@ class Connection(object):
         if session and session.encrypt_data or tree and tree.encrypt_data:
             send_data = self._encrypt(send_data, session)
 
-        self.transport.send(send_data)
+        await self.transport.send(send_data)
         return requests
 
-    def _process_message_thread(self, msg_queue):
+    async def _process_message_task(self, msg_queue):
         while True:
-            b_msg = msg_queue.get()
+            b_msg = await msg_queue.get()
 
             # The socket will put None in the queue if it is closed, signalling the end of the connection.
             if b_msg is None:
                 return
 
             try:
+                if not isinstance(b_msg, bytes):
+                    # receive thread can send exceptions instead of bytes
+                    raise b_msg
                 is_encrypted = b_msg[:4] == b"\xfdSMB"
                 if is_encrypted:
                     msg = SMB2TransformHeader()
@@ -1285,10 +1290,10 @@ class Connection(object):
                         self.verify_signature(header, session_id)
 
                     credit_response = header['credit_response'].get_value()
-                    with self.sequence_lock:
+                    async with self.sequence_lock:
                         self.sequence_window['high'] += credit_response if credit_response > 0 else 1
 
-                    with request.response_event_lock:
+                    async with request.response_event_lock:
                         if header['flags'].has_flag(Smb2Flags.SMB2_FLAGS_ASYNC_COMMAND):
                             request.async_id = b_header[32:40]
 
@@ -1304,7 +1309,7 @@ class Connection(object):
 
                 # While a caller of send/receive could theoretically catch this exception, we consider any failures
                 # here a fatal errors and the connection should be closed so we exit the worker thread.
-                self.disconnect(False)
+                self.close()
                 return
 
     def _generate_signature(self, b_header, signing_key):
@@ -1373,7 +1378,7 @@ class Connection(object):
         dec_message = c.decrypt(nonce, enc_message, message.pack()[20:52])
         return dec_message
 
-    def _send_smb2_negotiate(self, dialect, timeout):
+    async def _send_smb2_negotiate(self, dialect, timeout):
         self.salt = os.urandom(32)
 
         if dialect is None:
@@ -1443,10 +1448,10 @@ class Connection(object):
 
         log.info("Sending SMB2 Negotiate message")
         log.debug(neg_req)
-        request = self.send(neg_req)
+        request = await self.send(neg_req)
         self.preauth_integrity_hash_value.append(request.message)
 
-        response = self.receive(request, timeout=timeout)
+        response = await self.receive(request, timeout=timeout)
         log.info("Receiving SMB2 Negotiate response")
         log.debug(response)
         self.preauth_integrity_hash_value.append(response)
@@ -1525,11 +1530,11 @@ class Request(object):
         self.response = None
 
         # Used by the recv processing thread to say the response has been received and is ready for consumption.
-        self.response_event = threading.Event()
+        self.response_event = asyncio.Event()
 
         # Used to lock the request when the main thread is processing the PENDING result in case the background thread
         # receives the final result and fires the event before main clears it.
-        self.response_event_lock = threading.Lock()
+        self.response_event_lock = asyncio.Lock()
 
         # Stores the message_ids of related messages that are sent in a compound request. This is only set on the 1st
         # message in the request. Used when STATUS_STOPPED_ON_SYMLINK is set and we need to send the whole compound
@@ -1542,14 +1547,14 @@ class Request(object):
         self._connection = connection
         self._message_type = message_type  # Used to rehydrate the message data in case it's needed again.
 
-    def cancel(self):
+    async def cancel(self):
         if self.cancelled is True:
             return
 
         message_id = self.message['message_id'].get_value()
         log.info("Cancelling message %s" % message_id)
-        self._connection.send(SMB2CancelRequest(), sid=self.session_id, credit_request=0, message_id=message_id,
-                              async_id=self.async_id)
+        await self._connection.send(SMB2CancelRequest(), sid=self.session_id, credit_request=0, message_id=message_id,
+                                    async_id=self.async_id)
         self.cancelled = True
 
     def get_message_data(self):

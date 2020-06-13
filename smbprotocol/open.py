@@ -1156,17 +1156,17 @@ class Open(object):
     def connected(self):
         return self._connected
 
-    def _run_request(self, message: OpenMessage[R]) -> R:
+    async def _run_request(self, message: OpenMessage[R]) -> R:
         self._info(message.log_send)
         log.debug(message)
-        request = self.connection.send(
+        request = await self.connection.send(
             message,
             self.tree_connect.session.session_id,
             self.tree_connect.tree_connect_id,
         )
         self._info(message.log_recv)
         try:
-            response = self.connection.receive(request, wait=message.recv_wait)
+            response = await self.connection.receive(request, wait=message.recv_wait)
         except SMBResponseException as exc:
             if message.exception_handler:
                 return message.exception_handler(exc)
@@ -1248,7 +1248,7 @@ class Open(object):
 
         return create_contexts_response
 
-    def create(
+    async def create(
         self, impersonation_level, desired_access, file_attributes,
         share_access, create_disposition, create_options,
         create_contexts=None,
@@ -1295,7 +1295,7 @@ class Open(object):
             oplock_level,
         )
 
-        return self._run_request(message)
+        return await self._run_request(message)
 
     def build_read(
         self, offset, length, min_length=0, unbuffered=False, wait=True
@@ -1338,7 +1338,7 @@ class Open(object):
 
         return read_response['buffer'].get_value()
 
-    def read(
+    async def read(
         self, offset, length, min_length=0, unbuffered=False, wait=True
     ) -> bytes:
         """
@@ -1356,7 +1356,7 @@ class Open(object):
         """
         message = self.build_read(offset, length, min_length, unbuffered, wait)
 
-        return self._run_request(message)
+        return await self._run_request(message)
 
     def build_write(
         self, data, offset=0, write_through=False, unbuffered=False,
@@ -1408,7 +1408,7 @@ class Open(object):
 
         return write_response['count'].get_value()
 
-    def write(
+    async def write(
         self, data, offset=0, write_through=False, unbuffered=False,
         wait=True
     ) -> int:
@@ -1428,7 +1428,7 @@ class Open(object):
 
         message = self.build_write(data, offset, write_through, unbuffered, wait)
 
-        return self._run_request(message)
+        return await self._run_request(message)
 
     def build_flush(self) -> OpenMessage[SMB2FlushResponse]:
         """
@@ -1450,7 +1450,7 @@ class Open(object):
         log.debug(flush_response)
         return flush_response
 
-    def flush(self) -> SMB2FlushResponse:
+    async def flush(self) -> SMB2FlushResponse:
         """
         A command sent by the client to request that a server flush all cached
         file information for the opened file.
@@ -1459,7 +1459,7 @@ class Open(object):
         """
         message = self.build_flush()
 
-        return self._run_request(message)
+        return await self._run_request(message)
 
     def build_query_directory(
         self, pattern, file_information_class, flags=None,
@@ -1497,7 +1497,7 @@ class Open(object):
         results = SMB2QueryDirectoryRequest.unpack_response(file_cl, data)
         return results
 
-    def query_directory(
+    async def query_directory(
         self, pattern, file_information_class, flags=None,
         file_index=0, max_output=MAX_PAYLOAD_SIZE,
     ) -> typing.List[Structure]:
@@ -1523,7 +1523,7 @@ class Open(object):
             file_index, max_output,
         )
 
-        return self._run_request(message)
+        return await self._run_request(message)
 
     def build_close(
         self, get_attributes=False,
@@ -1581,7 +1581,7 @@ class Open(object):
             self.file_attributes = c_resp['file_attributes'].get_value()
         return c_resp
 
-    def close(self, get_attributes=False) -> typing.Optional[SMB2CloseResponse]:
+    async def close(self, get_attributes=False) -> typing.Optional[SMB2CloseResponse]:
         """
         Closes an opened file.
 
@@ -1595,4 +1595,4 @@ class Open(object):
 
         message = self.build_close(get_attributes)
 
-        return self._run_request(message)
+        return await self._run_request(message)

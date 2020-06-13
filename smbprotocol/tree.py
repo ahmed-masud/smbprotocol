@@ -214,7 +214,7 @@ class TreeConnect(object):
         self.encrypt_data = None
         self.is_scaleout_share = None
 
-    def connect(self, require_secure_negotiate=True):
+    async def connect(self, require_secure_negotiate=True):
         """
         Connect to the share.
 
@@ -231,12 +231,12 @@ class TreeConnect(object):
         log.info("Session: %s - Sending Tree Connect message"
                  % self.session.username)
         log.debug(connect)
-        request = self.session.connection.send(connect,
-                                               sid=self.session.session_id)
+        request = await self.session.connection.send(connect,
+                                                     sid=self.session.session_id)
 
         log.info("Session: %s - Receiving Tree Connect response"
                  % self.session.username)
-        response = self.session.connection.receive(request)
+        response = await self.session.connection.receive(request)
         tree_response = SMB2TreeConnectResponse()
         tree_response.unpack(response['data'].get_value())
         log.debug(tree_response)
@@ -267,7 +267,7 @@ class TreeConnect(object):
             if dialect < Dialects.SMB_3_1_1 and require_secure_negotiate:
                 self._verify_dialect_negotiate()
 
-    def disconnect(self):
+    async def disconnect(self):
         """
         Disconnects the tree connection.
         """
@@ -281,20 +281,20 @@ class TreeConnect(object):
         log.info("Session: %s, Tree: %s - Sending Tree Disconnect message"
                  % (self.session.username, self.share_name))
         log.debug(req)
-        request = self.session.connection.send(req,
-                                               sid=self.session.session_id,
-                                               tid=self.tree_connect_id)
+        request = await self.session.connection.send(req,
+                                                     sid=self.session.session_id,
+                                                     tid=self.tree_connect_id)
 
         log.info("Session: %s, Tree: %s - Receiving Tree Disconnect response"
                  % (self.session.username, self.share_name))
-        res = self.session.connection.receive(request)
+        res = await self.session.connection.receive(request)
         res_disconnect = SMB2TreeDisconnect()
         res_disconnect.unpack(res['data'].get_value())
         log.debug(res_disconnect)
         self._connected = False
         del self.session.tree_connect_table[self.tree_connect_id]
 
-    def _verify_dialect_negotiate(self):
+    async def _verify_dialect_negotiate(self):
         log_header = "Session: %s, Tree: %s" \
                      % (self.session.username, self.share_name)
         log.info("%s - Running secure negotiate process" % log_header)
@@ -318,12 +318,12 @@ class TreeConnect(object):
         log.info("%s - Sending Secure Negotiate Validation message"
                  % log_header)
         log.debug(ioctl_request)
-        request = self.session.connection.send(ioctl_request,
-                                               sid=self.session.session_id,
-                                               tid=self.tree_connect_id)
+        request = await self.session.connection.send(ioctl_request,
+                                                     sid=self.session.session_id,
+                                                     tid=self.tree_connect_id)
 
         log.info("%s - Receiving secure negotiation response" % log_header)
-        response = self.session.connection.receive(request)
+        response = await self.session.connection.receive(request)
         ioctl_resp = SMB2IOCTLResponse()
         ioctl_resp.unpack(response['data'].get_value())
         log.debug(ioctl_resp)

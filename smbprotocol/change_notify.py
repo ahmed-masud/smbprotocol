@@ -2,6 +2,7 @@
 # Copyright: (c) 2019, Jordan Borean (@jborean93) <jborean93@gmail.com>
 # MIT License (see LICENSE or https://opensource.org/licenses/MIT)
 
+import asyncio
 import logging
 import threading
 
@@ -171,10 +172,9 @@ class FileSystemWatcher(object):
         :param open: The Open() class of a directory to watch for change notifications.
         """
         self.open = open
-        self.response_event = threading.Event()
+        self.response_event = asyncio.Event()
 
-        self._t_on_response = threading.Thread(target=self._on_response)
-        self._t_on_response.daemon = True
+        self._t_on_response = None
         self._t_exc = None
         self._request = None
         self._file_actions = None
@@ -226,7 +226,8 @@ class FileSystemWatcher(object):
         """ States whether the change notify request was cancelled or not. """""
         return self._request is not None and self._request.cancelled is True
 
-    def start(self, completion_filter, flags=0, output_buffer_length=65536, send=True):
+    # TODO: should probably wait directly for the result?
+    async def start(self, completion_filter, flags=0, output_buffer_length=65536, send=True):
         """
         Starts a change notify request against the server with the options specified.
 
@@ -252,8 +253,8 @@ class FileSystemWatcher(object):
                  % (self.open.tree_connect.session.username, self.open.tree_connect.share_name, self.open.file_name))
         log.debug(change_notify)
         if send:
-            request = self.open.connection.send(change_notify, self.open.tree_connect.session.session_id,
-                                                self.open.tree_connect.tree_connect_id)
+            request = await self.open.connection.send(change_notify, self.open.tree_connect.session.session_id,
+                                                      self.open.tree_connect.tree_connect_id)
             self._start_response(request)
             return
         else:
@@ -261,26 +262,26 @@ class FileSystemWatcher(object):
 
     def _start_response(self, request):
         self._request = request
-        self._t_on_response.start()
+        self._t_on_response = asyncio.create_task(self._on_response())
 
-    def cancel(self):
+    async def cancel(self):
         """
         Cancels the change notify request on the server.
         """
-        self._request.cancel()
+        await self._request.cancel()
 
-    def wait(self):
+    async def wait(self):
         """
         Waits until a change response has been returned from the server.
 
         :return: The file action result
         """
-        self._t_on_response.join()
+        await self._t_on_response.wait()
         return self.result
 
-    def _on_response(self):
+    async def _on_response(self):
         try:
-            self.open.connection.receive(self._request)
+            await self.open.connection.receive(self._request)
         except SMBResponseException as exc:
             if exc.status == NtStatus.STATUS_CANCELLED:
                 self.is_cancelled = True

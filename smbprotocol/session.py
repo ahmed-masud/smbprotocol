@@ -282,7 +282,7 @@ class Session(object):
         self.preauth_integrity_hash_value = \
             connection.preauth_integrity_hash_value
 
-    def connect(self):
+    async def connect(self):
         log.debug("Decoding SPNEGO token containing supported auth mechanisms")
         token, rdata = decoder.decode(self.connection.gss_negotiate_token,
                                       asn1Spec=InitialContextToken())
@@ -306,7 +306,7 @@ class Session(object):
 
             log.info("Attempting auth with mech %s" % mech_key)
             try:
-                response, session_key = self._authenticate_session(mech)
+                response, session_key = await self._authenticate_session(mech)
                 break
             except Exception as exc:
                 log.warning("Failed auth for mech %s: %s"
@@ -396,7 +396,7 @@ class Session(object):
                      "successful")
             self.connection.verify_signature(response, self.session_id, force=True)
 
-    def disconnect(self, close=True):
+    async def disconnect(self, close=True):
         """
         Logs off the session
 
@@ -411,23 +411,23 @@ class Session(object):
                 open.close(False)
 
             for tree in list(self.tree_connect_table.values()):
-                tree.disconnect()
+                await tree.disconnect()
 
         log.info("Session: %s - Logging off of SMB Session" % self.username)
         logoff = SMB2Logoff()
         log.info("Session: %s - Sending Logoff message" % self.username)
         log.debug(logoff)
-        request = self.connection.send(logoff, sid=self.session_id)
+        request = await self.connection.send(logoff, sid=self.session_id)
 
         log.info("Session: %s - Receiving Logoff response" % self.username)
-        res = self.connection.receive(request)
+        res = await self.connection.receive(request)
         res_logoff = SMB2Logoff()
         res_logoff.unpack(res['data'].get_value())
         log.debug(res_logoff)
         self._connected = False
         del self.connection.session_table[self.session_id]
 
-    def _authenticate_session(self, mech):
+    async def _authenticate_session(self, mech):
         if mech in [MechTypes.KRB5, MechTypes.MS_KRB5] and HAVE_GSSAPI:
             context = GSSAPIContext(username=self.username,
                                     password=self.password,
@@ -454,14 +454,14 @@ class Session(object):
             session_setup['buffer'] = out_token
 
             log.info("Sending SMB2_SESSION_SETUP request message")
-            request = self.connection.send(session_setup,
-                                           sid=self.session_id,
-                                           credit_request=256)
+            request = await self.connection.send(session_setup,
+                                                 sid=self.session_id,
+                                                 credit_request=256)
             self.preauth_integrity_hash_value.append(request.message)
 
             log.info("Receiving SMB2_SESSION_SETUP response message")
             try:
-                response = self.connection.receive(request)
+                response = await self.connection.receive(request)
             except SMBResponseException as exc:
                 if exc.status != NtStatus.STATUS_MORE_PROCESSING_REQUIRED:
                     raise exc

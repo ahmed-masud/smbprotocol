@@ -2,11 +2,11 @@
 # Copyright: (c) 2019, Jordan Borean (@jborean93) <jborean93@gmail.com>
 # MIT License (see LICENSE or https://opensource.org/licenses/MIT)
 
+import asyncio
 import logging
 import select
 import socket
 import struct
-import threading
 
 from collections import (
     OrderedDict,
@@ -49,26 +49,6 @@ class DirectTCPPacket(Structure):
         super(DirectTCPPacket, self).__init__()
 
 
-def socket_connect(func):
-    def wrapped(self, *args, **kwargs):
-        if not self._connected:
-            log.info("Connecting to DirectTcp socket")
-            try:
-                self._sock = socket.create_connection((self.server, self.port), timeout=self.timeout)
-            except (OSError, socket.gaierror) as err:
-                raise ValueError("Failed to connect to '%s:%s': %s" % (self.server, self.port, str(err)))
-            self._sock.settimeout(None)  # Make sure the socket is in blocking mode.
-
-            self._t_recv = threading.Thread(target=self.recv_thread, name="recv-%s:%s" % (self.server, self.port))
-            self._t_recv.daemon = True
-            self._t_recv.start()
-            self._connected = True
-
-        func(self, *args, **kwargs)
-
-    return wrapped
-
-
 class Tcp(object):
 
     MAX_SIZE = 16777215
@@ -82,18 +62,53 @@ class Tcp(object):
         self._recv_queue = recv_queue
         self._t_recv = None
 
-    def close(self):
+    async def connect(self):
+        def wrap_err_msg(err):
+            return "Failed to connect to '%s:%s': %s" % (self.server, self.port, str(err))
+
+        if not self._connected:
+            log.info("Connecting to DirectTcp socket")
+            try:
+                self._reader, self._writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.server, self.port),
+                    timeout=self.timeout,
+                )
+            except asyncio.TimeoutError as err:
+                raise asyncio.TimeoutError(wrap_err_msg(err))
+            except OSError as err:
+                err.strerror = wrap_err_msg(err.strerror)
+                raise err
+            self._t_recv = asyncio.create_task(self._recv_task(), name="recv-%s:%s" % (self.server, self.port))
+            self._connected = True
+
+    async def disconnect(self):
         if self._connected:
             log.info("Disconnecting DirectTcp socket")
             # Send a shutdown to the socket so the select returns and wait until the thread is closed before actually
             # closing the socket.
+            await self._writer.drain()
             self._connected = False
-            self._sock.shutdown(socket.SHUT_RDWR)
-            self._t_recv.join()
-            self._sock.close()
+            if self._writer.can_write_eof():
+                self._writer.write_eof()
+                await self._writer.drain()
+            self._writer.close()
+            await self._writer.wait_closed()
+            try:
+                # give receive task 1 second to quit
+                await asyncio.wait_for(self._t_recv, timeout=1)
+            except asyncio.TimeoutError:
+                self._t_recv.cancel()
 
-    @socket_connect
-    def send(self, header):
+    def close(self):
+        if self._connected:
+            log.info("Closing DirectTcp socket")
+            self._connected = False
+            if self._writer.can_write_eof():
+                self._writer.write_eof()
+            self._t_recv.cancel()
+            self._writer.close()
+
+    async def send(self, header):
         b_msg = header
         data_length = len(b_msg)
         if data_length > self.MAX_SIZE:
@@ -103,34 +118,26 @@ class Tcp(object):
         tcp_packet = DirectTCPPacket()
         tcp_packet['smb2_message'] = b_msg
 
-        data = tcp_packet.pack()
-        while data:
-            sent = self._sock.send(data)
-            data = data[sent:]
+        self._writer.write(tcp_packet.pack())
+        await self._writer.drain()
 
-    def recv_thread(self):
+    async def _recv_task(self):
         try:
             while True:
-                select.select([self._sock], [], [])
-                b_packet_size = self._sock.recv(4)
-                if b_packet_size == b"":
-                    return
-
-                packet_size = struct.unpack(">L", b_packet_size)[0]
-                b_data = bytearray()
-                bytes_read = 0
-                while bytes_read < packet_size:
-                    b_fragment = self._sock.recv(packet_size - bytes_read)
-                    b_data.extend(b_fragment)
-                    bytes_read += len(b_fragment)
-
-                self._recv_queue.put(bytes(b_data))
-        except Exception as e:
-            # Log a warning if the exception was raised while we were connected and not just some weird platform-ism
-            # exception when reading from a closed socket.
+                b_packet_size = await self._reader.readexactly(4)
+                message_type = b_packet_size[0]
+                assert message_type == 0, "Unexpected NetBIOS message type 0x%02x" % message_type
+                packet_size = (b_packet_size[1] << 16) + (b_packet_size[2] << 8) + b_packet_size[3]
+                await self._recv_queue.put(await self._reader.readexactly(packet_size))
+        except asyncio.CancelledError:
+            raise
+        except asyncio.IncompleteReadError as e:
+            if len(e.partial) == 0: return
             if self._connected:
-                log.warning("Uncaught exception in socket recv thread: %s" % e)
-            return
+                await self._recv_queue.put(e)
+        except Exception as e:
+            if self._connected:
+                await self._recv_queue.put(e)
         finally:
-            # Make sure we close the message processing thread in connection.py
-            self._recv_queue.put(None)
+            # Make sure we close the message processing task in connection.py
+            await self._recv_queue.put(None)
