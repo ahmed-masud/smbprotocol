@@ -857,7 +857,7 @@ class Connection(object):
         await self.transport.connect()
         self._message_task = asyncio.create_task(
             self._process_message_task(message_queue),
-            name="msg_worker-%s:%s" % (self.server_name, self.port),
+            # name="msg_worker-%s:%s" % (self.server_name, self.port),  # requires python3.8
         )
 
         log.info("Starting negotiation with SMB server")

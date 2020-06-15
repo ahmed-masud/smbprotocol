@@ -78,7 +78,10 @@ class Tcp(object):
             except OSError as err:
                 err.strerror = wrap_err_msg(err.strerror)
                 raise err
-            self._t_recv = asyncio.create_task(self._recv_task(), name="recv-%s:%s" % (self.server, self.port))
+            self._t_recv = asyncio.create_task(
+                self._recv_task(),
+                # name="recv-%s:%s" % (self.server, self.port),  # requires python3.8
+            )
             self._connected = True
 
     async def disconnect(self):
