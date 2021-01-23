@@ -1160,7 +1160,7 @@ class Open(object):
         self._info(message.log_send)
         log.debug(message)
         request = await self.connection.send(
-            message,
+            message.message,
             self.tree_connect.session.session_id,
             self.tree_connect.tree_connect_id,
         )
@@ -1172,7 +1172,7 @@ class Open(object):
                 return message.exception_handler(exc)
             else:
                 raise exc
-        return response_handler(response)
+        return message.response_handler(response)
 
     def build_create(
         self, impersonation_level, desired_access, file_attributes,
@@ -1209,7 +1209,7 @@ class Open(object):
             message=create,
             response_handler=self._create_response,
             log_send="sending SMB2 Create Request for file %s" % self.file_name,
-            loc_recv="receiving SMB2 Create Response",
+            log_recv="receiving SMB2 Create Response",
         )
 
     def _create_response(
@@ -1327,7 +1327,7 @@ class Open(object):
             message=read,
             response_handler=self._read_response,
             log_send="sending SMB2 Read Request for file %s" % self.file_name,
-            loc_recv="receiving SMB2 Read Response",
+            log_recv="receiving SMB2 Read Response",
             recv_wait=wait,
         )
 
@@ -1397,7 +1397,7 @@ class Open(object):
             message=write,
             response_handler=self._write_response,
             log_send="sending SMB2 Write Request for file %s" % self.file_name,
-            loc_recv="receiving SMB2 Read Response",
+            log_recv="receiving SMB2 Read Response",
             recv_wait=wait,
         )
 
@@ -1441,7 +1441,7 @@ class Open(object):
             message=flush,
             response_handler=self._flush_response,
             log_send="sending SMB2 Flush Request for file %s" % self.file_name,
-            loc_recv="receiving SMB2 Flush Response",
+            log_recv="receiving SMB2 Flush Response",
         )
 
     def _flush_response(self, response) -> SMB2FlushResponse:
@@ -1485,7 +1485,7 @@ class Open(object):
             message=query,
             response_handler=response_handler,
             log_send="sending SMB2 Query Directory Request for directory %s" % self.file_name,
-            loc_recv="receiving SMB2 Query Response",
+            log_recv="receiving SMB2 Query Response",
         )
 
     def _query_directory_response(self, response, *, file_cl) -> typing.List[Structure]:
@@ -1547,7 +1547,7 @@ class Open(object):
             response_handler=response_handler,
             exception_handler=self._close_response_exception,
             log_send="sending SMB2 Close Request for file %s" % self.file_name,
-            loc_recv="receiving SMB2 Close Response",
+            log_recv="receiving SMB2 Close Response",
         )
 
     def _close_response_exception(
