@@ -193,7 +193,7 @@ class SMB2ChangeNotifyResponse(Structure):
 
 
 class FileSystemWatcher:
-    def __init__(self, open):
+    def __init__(self, open, on_change=None):
         """
         A class that encapsulates a FileSystemWatcher over SMB. It is designed to make it easy to run the watcher in
         the background and provide an event that is fired when the server notifies that a change has occurred. It is
@@ -202,6 +202,7 @@ class FileSystemWatcher:
         :param open: The Open() class of a directory to watch for change notifications.
         """
         self.open = open
+        self.on_change = on_change
         self.response_event = threading.Event()
 
         self._t_on_response = threading.Thread(target=self._on_response)
@@ -326,5 +327,9 @@ class FileSystemWatcher:
             self._t_exc = exc
 
         finally:
+            if self.on_change is not None:
+                self.on_change(self.result)  # Call the provided callback with the result
+
             log.debug("Firing response event for %s change notify" % self.open.file_name)
+
             self.response_event.set()
