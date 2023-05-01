@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # Copyright: (c) 2019, Jordan Borean (@jborean93) <jborean93@gmail.com>
+# Copyright: (c) 2023, Ahmed Masud <ahmed.masud@saf.ai>
 # MIT License (see LICENSE or https://opensource.org/licenses/MIT)
 
 import logging
