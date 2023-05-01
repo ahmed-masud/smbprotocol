@@ -20,7 +20,7 @@ from smbprotocol.structure import (
 log = logging.getLogger(__name__)
 
 
-class ChangeNotifyFlags:
+class ChangeNotifyFlags(FlagField):
     """
     [MS-SMB2] 2.2.35 SMB2 CHANGE_NOTIFY Request - Flags
     https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/598f395a-e7a2-4cc8-afb3-ccb30dd2df7c
@@ -30,7 +30,7 @@ class ChangeNotifyFlags:
     SMB2_WATCH_TREE = 0x0001
 
 
-class CompletionFilter:
+class CompletionFilter(EnumField):
     """
     [MS-SMB2] 2.2.35 SMB2 CHANGE_NOTIFY Request - CompletionFilter
     https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/598f395a-e7a2-4cc8-afb3-ccb30dd2df7c
@@ -50,7 +50,7 @@ class CompletionFilter:
     FILE_NOTIFY_CHANGE_STREAM_WRITE = 0x00000800
 
 
-class FileAction:
+class FileAction(EnumField):
     """
     [MS-FSCC] 2.7.1 FILE_NOTIFY_INFORMATION - Action
     https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/634043d7-7b39-47e9-9e26-bda64685e4c9
@@ -103,6 +103,14 @@ class FileNotifyInformation(Structure):
             ]
         )
         super().__init__()
+
+    def __str__(self):
+        return "FileNotifyInformation - Action: {}, File Name: {}".format(
+            self["action"], self["file_name"]
+        )
+
+    def __repr__(self):
+        return str(self)
 
 
 class SMB2ChangeNotifyRequest(Structure):
@@ -209,7 +217,8 @@ class FileSystemWatcher:
         self._t_exc = None
         self._request = None
         self._file_actions = None
-        self._result_lock = threading.Lock()  # Used to ensure the result is only processed once
+        # Used to ensure the result is only processed once
+        self._result_lock = threading.Lock()
 
     @property
     def result(self):
@@ -249,7 +258,7 @@ class FileSystemWatcher:
 
                 current_offset += notify_info["next_entry_offset"].get_value()
                 is_next = notify_info["next_entry_offset"].get_value() != 0
-
+        log.info("FileSystemWatcher result: {}".format(self._file_actions))
         return self._file_actions
 
     @property
@@ -324,7 +333,7 @@ class FileSystemWatcher:
             self._file_actions = []
         except Exception as exc:
             self._t_exc = exc
-
         finally:
-            log.debug("Firing response event for %s change notify" % self.open.file_name)
+            log.debug("Firing response event for %s change notify" %
+                      self.open.file_name)
             self.response_event.set()
